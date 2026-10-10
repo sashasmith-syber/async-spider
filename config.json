@@ -1,0 +1,29 @@
+{
+  "crawler": {
+    "start_urls": [
+      "https://example.com"
+    ],
+    "allowed_domains": [
+      "example.com",
+      "www.example.com"
+    ],
+    "num_workers": 4,
+    "requests_per_second": 1.0,
+    "max_depth": 3,
+    "timeout": 30,
+    "db_path": "data/crawl_results.db"
+  },
+  "logging": {
+    "level": "INFO",
+    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  },
+  "security": {
+    "verify_ssl": true,
+    "allow_private_networks": false,
+    "user_agent": "AsyncCrawler/1.0 (+https://example.com/bot)"
+  },
+  "database": {
+    "type": "sqlite",
+    "connection_timeout": 5
+  }
+}

@@ -1,0 +1,146 @@
+# UNVERIFIED EXAMPLE. This manifest has not been applied to a cluster.
+# Build the image from the repository Dockerfile (python:3.11-slim, uid 1000).
+# It is not a Docker Hardened Image. Replace async-spider:local before use.
+# SQLite on an emptyDir volume is local to one pod. Do not scale this deployment.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: web-crawler
+  labels:
+    name: web-crawler
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: crawler-config
+  namespace: web-crawler
+data:
+  config.json: |
+    {
+      "crawler": {
+        "start_urls": ["https://example.com"],
+        "allowed_domains": ["example.com", "www.example.com"],
+        "num_workers": 4,
+        "requests_per_second": 1.0,
+        "max_depth": 3,
+        "timeout": 30,
+        "db_path": "/app/data/crawl_results.db"
+      },
+      "logging": {
+        "level": "INFO",
+        "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+      },
+      "security": {
+        "verify_ssl": true,
+        "allow_private_networks": false,
+        "user_agent": "AsyncCrawler/1.0 (+https://example.com/bot)"
+      },
+      "database": {
+        "type": "sqlite",
+        "connection_timeout": 5
+      }
+    }
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: crawler
+  namespace: web-crawler
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-crawler
+  namespace: web-crawler
+  labels:
+    app: web-crawler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: web-crawler
+  template:
+    metadata:
+      labels:
+        app: web-crawler
+    spec:
+      serviceAccountName: crawler
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: crawler
+        image: async-spider:local
+        imagePullPolicy: IfNotPresent
+        command: ["python", "crawler_async.py"]
+        env:
+        - name: HOME
+          value: /tmp
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: PYTHONDONTWRITEBYTECODE
+          value: "1"
+        volumeMounts:
+        - name: crawler-config
+          mountPath: /app/config.json
+          subPath: config.json
+          readOnly: true
+        - name: data
+          mountPath: /app/data
+        - name: tmp
+          mountPath: /tmp
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "1"
+        livenessProbe:
+          exec:
+            command: ["python", "-c", "import os,sys; sys.exit(0 if os.path.isdir('/app/data') else 1)"]
+          initialDelaySeconds: 10
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          exec:
+            command: ["python", "-c", "import crawler_async"]
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 2
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      - name: crawler-config
+        configMap:
+          name: crawler-config
+      - name: data
+        emptyDir: {}
+      - name: tmp
+        emptyDir: {}
+      terminationGracePeriodSeconds: 30
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: crawler-pdb
+  namespace: web-crawler
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: web-crawler

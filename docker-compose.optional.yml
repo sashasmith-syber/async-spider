@@ -1,0 +1,101 @@
+# Optional services. The crawler does not connect to PostgreSQL.
+# Prometheus and Grafana are not started by docker compose up.
+# Bindings are localhost-only. Set passwords in the environment; do not commit them.
+#
+#   DB_PASSWORD=... GRAFANA_PASSWORD=... docker compose -f docker-compose.yml -f docker-compose.optional.yml --profile monitoring up
+#   DB_PASSWORD=... docker compose -f docker-compose.yml -f docker-compose.optional.yml --profile postgres up
+
+services:
+  metrics:
+    profiles: ["monitoring"]
+    image: async-spider:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "metrics_exporter.py"]
+    user: "1000:1000"
+    environment:
+      CRAWL_DB: /app/data/crawl_results.db
+      METRICS_BIND: 0.0.0.0
+      METRICS_PORT: "8080"
+      HOME: /tmp
+    volumes:
+      - crawl_data:/app/data:ro
+    ports:
+      - "127.0.0.1:8080:8080"
+    networks:
+      - crawler-network
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      - crawler
+
+  prometheus:
+    profiles: ["monitoring"]
+    image: prom/prometheus:latest
+    container_name: crawler-prometheus
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    networks:
+      - crawler-network
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      - metrics
+
+  grafana:
+    profiles: ["monitoring"]
+    image: grafana/grafana:latest
+    container_name: crawler-grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:?Set GRAFANA_PASSWORD}
+      GF_SERVER_ROOT_URL: http://127.0.0.1:3000
+    volumes:
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3000:3000"
+    networks:
+      - crawler-network
+    depends_on:
+      - prometheus
+    security_opt:
+      - no-new-privileges:true
+
+  postgres:
+    profiles: ["postgres"]
+    image: postgres:15-alpine
+    container_name: crawler-db
+    environment:
+      POSTGRES_DB: crawler
+      POSTGRES_USER: crawler_user
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "127.0.0.1:5432:5432"
+    networks:
+      - crawler-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U crawler_user"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  prometheus_data:
+  grafana_data:
+  postgres_data:

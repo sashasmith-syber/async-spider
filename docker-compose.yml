@@ -1,0 +1,37 @@
+services:
+  crawler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: async-spider:local
+    container_name: web-crawler
+    user: "1000:1000"
+    environment:
+      PYTHONUNBUFFERED: "1"
+      HOME: /tmp
+    volumes:
+      - crawl_data:/app/data
+      - ./config.json:/app/config.json:ro
+    restart: on-failure:3
+    networks:
+      - crawler-network
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,sys; sys.exit(0 if os.path.isdir('/app/data') else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  crawl_data:
+
+networks:
+  crawler-network:
+    driver: bridge
