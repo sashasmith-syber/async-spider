@@ -183,6 +183,35 @@ class CliAndMetricsTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(stats["successful"], 1)
             self.assertIsNotNone(database.db_path)
 
+    def test_cli_domain_summary_groups_by_host(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "crawl.db")
+            CrawlDatabase(db_path)
+            conn = sqlite3.connect(db_path)
+            conn.executemany(
+                "INSERT INTO crawl_results (url, status_code, title, links_count, error, crawled_at, response_time) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [
+                    ("http://127.0.0.1:8765/", 200, "Home", 2, None, "2026-01-01T00:00:00+00:00", 0.1),
+                    ("http://127.0.0.1:8765/missing", 404, None, 0, "HTTP 404", "2026-01-01T00:00:01+00:00", 0.3),
+                    ("https://Example.com", 200, "Example", 0, None, "2026-01-01T00:00:02+00:00", None),
+                ],
+            )
+            conn.commit()
+            conn.close()
+            with patch("builtins.print"):
+                summary = CrawlerCLI(db_path).domain_summary()
+            self.assertEqual(
+                [(row["domain"], row["count"], row["success"]) for row in summary],
+                [("127.0.0.1:8765", 2, 1), ("example.com", 1, 1)],
+            )
+            self.assertAlmostEqual(summary[0]["avg_time"], 0.2)
+            self.assertEqual(summary[1]["avg_time"], 0.0)
+
+    def test_cli_domain_summary_reports_missing_table(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("builtins.print"):
+                self.assertIsNone(CrawlerCLI(os.path.join(tmp, "empty.db")).domain_summary())
+
     async def test_health_and_metrics_from_sqlite(self):
         with tempfile.TemporaryDirectory() as tmp:
             missing = os.path.join(tmp, "missing.db")

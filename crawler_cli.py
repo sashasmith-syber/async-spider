@@ -9,7 +9,8 @@ import argparse
 import csv
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Optional
+from urllib.parse import urlsplit
 import sys
 
 
@@ -141,35 +142,43 @@ class CrawlerCLI:
         except Exception as e:
             print(f"Error exporting CSV: {e}")
 
-    def domain_summary(self):
-        """Show summary by domain."""
+    def domain_summary(self) -> Optional[List[Dict]]:
+        """Show summary by domain. Returns the rows, or None on error."""
         try:
             conn = self._get_connection()
-            cursor = conn.cursor()
+            try:
+                rows = conn.execute("SELECT url, status_code, response_time FROM crawl_results").fetchall()
+            finally:
+                conn.close()
 
-            cursor.execute("""
-                SELECT
-                    SUBSTR(url, 0, INSTR(url || '/', '/', INSTR(url, '//') + 2)) as domain,
-                    COUNT(*) as count,
-                    SUM(CASE WHEN status_code = 200 THEN 1 ELSE 0 END) as success,
-                    AVG(response_time) as avg_time
-                FROM crawl_results
-                GROUP BY domain
-                ORDER BY count DESC
-            """)
+            # SQLite has no URL parser, so group by host in Python.
+            domains: Dict[str, Dict] = {}
+            for row in rows:
+                domain = urlsplit(row["url"]).netloc.lower() or "(invalid url)"
+                entry = domains.setdefault(domain, {"domain": domain, "count": 0, "success": 0, "times": []})
+                entry["count"] += 1
+                if row["status_code"] == 200:
+                    entry["success"] += 1
+                if row["response_time"] is not None:
+                    entry["times"].append(row["response_time"])
 
-            rows = cursor.fetchall()
+            summary = []
+            for entry in sorted(domains.values(), key=lambda e: (-e["count"], e["domain"])):
+                times = entry.pop("times")
+                entry["avg_time"] = sum(times) / len(times) if times else 0.0
+                summary.append(entry)
 
             print(f"\n{'Domain':<40} {'Count':<10} {'Success':<10} {'Avg Time':<10}")
             print("-" * 70)
 
-            for row in rows:
-                print(f"{row[0]:<40} {row[1]:<10} {row[2]:<10} {row[3]:<10.3f}")
+            for entry in summary:
+                print(f"{entry['domain']:<40} {entry['count']:<10} {entry['success']:<10} {entry['avg_time']:<10.3f}")
 
-            conn.close()
+            return summary
 
         except Exception as e:
-            print(f"Error getting domain summary: {e}")
+            print(f"Error getting domain summary: {e}", file=sys.stderr)
+            return None
 
     def clear_old(self, days: int = 30):
         """Clear old results."""
@@ -277,7 +286,8 @@ Examples:
         cli.export_csv(args.output)
 
     elif args.command == 'domains':
-        cli.domain_summary()
+        if cli.domain_summary() is None:
+            sys.exit(1)
 
     elif args.command == 'clear':
         cli.clear_old(days=args.days)
