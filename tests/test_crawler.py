@@ -15,6 +15,7 @@ import example_usage
 from crawler_async import (
     AsyncCrawler,
     CrawlDatabase,
+    CrawlResult,
     RobotsParser,
     URLFilter,
     address_is_public,
@@ -141,7 +142,7 @@ class LocalCrawlTests(unittest.IsolatedAsyncioTestCase):
                     max_depth=1,
                     timeout=5,
                     db_path=os.path.join(tmp, "redir.db"),
-                    allow_private_networks=True,
+                    allow_private_networks=False,
                 )
                 await redirector.run(crawl_timeout=10)
                 redirected = redirector.db.get_results()
@@ -164,9 +165,71 @@ class LocalCrawlTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(stats["crawled"], 1)
         self.assertEqual(rows[0]["title"], "Fixture")
-        self.assertEqual(redirected[0]["status_code"], 302)
-        self.assertIn("redirect", redirected[0]["error"])
+        self.assertEqual(redirected[0]["status_code"], 0)
+        self.assertIn("non-public address", redirected[0]["error"])
         self.assertEqual(oversized[0]["error"], "response too large")
+
+    async def test_safe_same_domain_redirects_and_loop_detection(self):
+        async def hop1(_request):
+            raise web.HTTPFound("/hop2")
+
+        async def hop2(_request):
+            html = "<html><head><title>Landed Target</title></head><body><a href='/sub'>sub</a></body></html>"
+            return web.Response(text=html, content_type="text/html")
+
+        async def loop_start(_request):
+            raise web.HTTPFound("/loop_start")
+
+        async def robots(_request):
+            return web.Response(text="User-agent: *\nAllow: /\n", content_type="text/plain")
+
+        app = web.Application()
+        app.router.add_get("/robots.txt", robots)
+        app.router.add_get("/hop1", hop1)
+        app.router.add_get("/hop2", hop2)
+        app.router.add_get("/loop_start", loop_start)
+
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        base = f"http://127.0.0.1:{port}"
+
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                crawler = AsyncCrawler(
+                    start_urls=[base + "/hop1"],
+                    allowed_domains=["127.0.0.1"],
+                    num_workers=1,
+                    requests_per_second=100,
+                    max_depth=0,
+                    timeout=5,
+                    db_path=os.path.join(tmp, "hops.db"),
+                    allow_private_networks=True,
+                )
+                stats = await crawler.run(crawl_timeout=10)
+                results = crawler.db.get_results()
+
+                loop_crawler = AsyncCrawler(
+                    start_urls=[base + "/loop_start"],
+                    allowed_domains=["127.0.0.1"],
+                    num_workers=1,
+                    requests_per_second=100,
+                    max_depth=0,
+                    timeout=5,
+                    db_path=os.path.join(tmp, "loop.db"),
+                    allow_private_networks=True,
+                )
+                await loop_crawler.run(crawl_timeout=10)
+                loop_results = loop_crawler.db.get_results()
+        finally:
+            await runner.cleanup()
+
+        self.assertEqual(stats["crawled"], 1)
+        self.assertEqual(results[0]["status_code"], 200)
+        self.assertEqual(results[0]["title"], "Landed Target")
+        self.assertIn("too many redirects", loop_results[0]["error"])
 
 
 class FilterAndRobotsTests(unittest.IsolatedAsyncioTestCase):
@@ -208,6 +271,29 @@ class CliAndMetricsTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(stats["total_crawled"], 1)
             self.assertEqual(stats["successful"], 1)
             self.assertIsNotNone(database.db_path)
+
+    def test_crawled_links_graph_persistence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "links.db")
+            db = CrawlDatabase(db_path)
+            res = CrawlResult(
+                url="https://example.com/parent",
+                status_code=200,
+                title="Parent Title",
+                links=["https://example.com/child1", "https://example.com/child2"],
+                error=None,
+                crawled_at="2026-01-01T00:00:00+00:00",
+                response_time=0.15,
+            )
+            db.save_result(res)
+
+            conn = sqlite3.connect(db_path)
+            rows = conn.execute("SELECT parent_url, child_url FROM crawled_links ORDER BY child_url").fetchall()
+            conn.close()
+
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(rows[0], ("https://example.com/parent", "https://example.com/child1"))
+            self.assertEqual(rows[1], ("https://example.com/parent", "https://example.com/child2"))
 
     def test_cli_domain_summary_groups_by_host(self):
         with tempfile.TemporaryDirectory() as tmp:
