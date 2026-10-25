@@ -33,6 +33,7 @@ MAX_LINKS_PER_PAGE = 200
 MAX_QUEUE_SIZE = 10_000
 MAX_ROBOTS_BYTES = 100_000
 DEFAULT_CRAWL_TIMEOUT = 300
+MAX_REDIRECT_HOPS = 3
 
 Resolver = Callable[[str, int], Sequence[str]]
 
@@ -378,6 +379,11 @@ class CrawlDatabase:
                 result.crawled_at,
                 result.response_time,
             ))
+            if result.links:
+                cursor.executemany("""
+                    INSERT OR IGNORE INTO crawled_links (parent_url, child_url)
+                    VALUES (?, ?)
+                """, [(result.url, child) for child in result.links])
             conn.commit()
         except Exception as exc:
             logger.error("Failed to save result for %s: %s", result.url, exc)
@@ -476,49 +482,71 @@ class AsyncCrawler:
             logger.warning("Queue is full; skipped %s", url)
 
     async def fetch_url(self, url: str) -> CrawlResult:
-        """Fetch and parse a single URL. Redirects are not followed."""
+        """Fetch and parse a single URL, safely following same-domain redirects."""
         start_time = time.time()
-        domain = urlparse(url).netloc
+        current_url = url
+        hops = 0
 
-        reason = await asyncio.to_thread(
-            destination_block_reason,
-            url,
-            self.allow_private_networks,
-            self.url_filter.resolver,
-        )
-        if reason:
-            self.stats["skipped"] += 1
-            return self._result(url, 0, reason, start_time)
-
-        try:
-            if not await self.robots_parser.can_fetch(url, self.user_agent):
-                logger.info("Robots.txt blocks: %s", url)
+        while True:
+            domain = urlparse(current_url).netloc
+            reason = await asyncio.to_thread(
+                destination_block_reason,
+                current_url,
+                self.allow_private_networks,
+                self.url_filter.resolver,
+            )
+            if reason:
                 self.stats["skipped"] += 1
-                return self._result(url, 0, "Blocked by robots.txt", start_time)
-        except Exception as exc:
-            self.stats["skipped"] += 1
-            return self._result(url, 0, f"robots.txt check failed: {exc}", start_time)
+                return self._result(url, 0, reason, start_time)
 
-        await self.rate_limiter.wait(domain)
-
-        try:
-            async with self.session.get(url, allow_redirects=False) as resp:
-                if resp.status in (301, 302, 303, 307, 308):
+            try:
+                if not await self.robots_parser.can_fetch(current_url, self.user_agent):
+                    logger.info("Robots.txt blocks: %s", current_url)
                     self.stats["skipped"] += 1
-                    return self._result(url, resp.status, "redirects are not followed", start_time)
-                if resp.status != 200:
-                    self.stats["failed"] += 1
-                    return self._result(url, resp.status, f"HTTP {resp.status}", start_time)
-                if resp.content_length is not None and resp.content_length > self.max_response_bytes:
-                    self.stats["failed"] += 1
-                    return self._result(url, resp.status, "response too large", start_time)
-                body = await resp.content.read(self.max_response_bytes + 1)
-        except asyncio.TimeoutError:
-            self.stats["failed"] += 1
-            return self._result(url, 0, "Timeout", start_time)
-        except Exception as exc:
-            self.stats["failed"] += 1
-            return self._result(url, 0, str(exc), start_time)
+                    return self._result(url, 0, "Blocked by robots.txt", start_time)
+            except Exception as exc:
+                self.stats["skipped"] += 1
+                return self._result(url, 0, f"robots.txt check failed: {exc}", start_time)
+
+            await self.rate_limiter.wait(domain)
+
+            try:
+                async with self.session.get(current_url, allow_redirects=False) as resp:
+                    if resp.status in (301, 302, 303, 307, 308):
+                        location = resp.headers.get("Location")
+                        if not location:
+                            self.stats["skipped"] += 1
+                            return self._result(url, resp.status, "redirect missing location header", start_time)
+
+                        hops += 1
+                        if hops > MAX_REDIRECT_HOPS:
+                            self.stats["failed"] += 1
+                            return self._result(url, resp.status, "too many redirects", start_time)
+
+                        redirect_url = urljoin(current_url, location)
+                        redirect_host = urlparse(redirect_url).hostname or ""
+                        if not host_allowed(redirect_host, self.allowed_domains):
+                            self.stats["skipped"] += 1
+                            return self._result(url, resp.status, "redirect target host not allowed", start_time)
+
+                        current_url = redirect_url
+                        continue
+
+                    if resp.status != 200:
+                        self.stats["failed"] += 1
+                        return self._result(url, resp.status, f"HTTP {resp.status}", start_time)
+                    if resp.content_length is not None and resp.content_length > self.max_response_bytes:
+                        self.stats["failed"] += 1
+                        return self._result(url, resp.status, "response too large", start_time)
+                    body = await resp.content.read(self.max_response_bytes + 1)
+            except asyncio.TimeoutError:
+                self.stats["failed"] += 1
+                return self._result(url, 0, "Timeout", start_time)
+            except Exception as exc:
+                self.stats["failed"] += 1
+                return self._result(url, 0, str(exc), start_time)
+
+            break
 
         if len(body) > self.max_response_bytes:
             self.stats["failed"] += 1
@@ -534,7 +562,7 @@ class AsyncCrawler:
             for anchor in soup.find_all("a", href=True):
                 if len(links) >= MAX_LINKS_PER_PAGE:
                     break
-                link = urljoin(url, anchor.get("href", ""))
+                link = urljoin(current_url, anchor.get("href", ""))
                 if link.startswith(("http://", "https://")):
                     links.append(link)
             self.stats["crawled"] += 1
