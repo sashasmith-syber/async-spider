@@ -140,7 +140,10 @@ The unit tests do not crawl third-party sites.
 - The metrics process is not the crawler and cannot see the live queue.
 - The `crawled_links` table is created and is not filled.
 - `logging.format` in `config.json` is not applied.
-- No license has been selected. See the maintainer before redistributing.
+
+## License
+
+This project is licensed under the terms of the [MIT License](LICENSE).
 
 ## Older notes
 
