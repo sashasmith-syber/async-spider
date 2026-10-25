@@ -5,6 +5,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from urllib.robotparser import RobotFileParser
 from unittest.mock import patch
 
 from aiohttp import web
@@ -14,6 +15,8 @@ import example_usage
 from crawler_async import (
     AsyncCrawler,
     CrawlDatabase,
+    RobotsParser,
+    URLFilter,
     address_is_public,
     destination_block_reason,
     host_allowed,
@@ -164,6 +167,29 @@ class LocalCrawlTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(redirected[0]["status_code"], 302)
         self.assertIn("redirect", redirected[0]["error"])
         self.assertEqual(oversized[0]["error"], "response too large")
+
+
+class FilterAndRobotsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_url_filter_dedupes_and_enforces_depth(self):
+        public = lambda _h, _p: ["1.1.1.1"]
+        url_filter = URLFilter(["example.com"], max_depth=2, resolver=public)
+        self.assertTrue(await url_filter.should_crawl("https://example.com/a/b"))
+        self.assertFalse(await url_filter.should_crawl("https://example.com/a/b"))
+        self.assertFalse(await url_filter.should_crawl("https://example.com/a/b/c"))
+        self.assertFalse(await url_filter.should_crawl("https://other.test/"))
+
+    async def test_robots_disallow_and_fetch_failure_refuse(self):
+        robots = RobotsParser()
+        parser = RobotFileParser()
+        parser.parse(["User-agent: *", "Disallow: /private"])
+        with patch("crawler_async._read_robots", return_value=parser) as read:
+            self.assertTrue(await robots.can_fetch("https://example.com/ok"))
+            self.assertFalse(await robots.can_fetch("https://example.com/private/x"))
+            self.assertEqual(read.call_count, 1)
+
+        failing = RobotsParser()
+        with patch("crawler_async._read_robots", side_effect=OSError("boom")):
+            self.assertFalse(await failing.can_fetch("https://down.example/"))
 
 
 class CliAndMetricsTests(unittest.IsolatedAsyncioTestCase):
