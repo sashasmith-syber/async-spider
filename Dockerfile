@@ -1,6 +1,6 @@
 # Docker Official Image. This is not a Docker Hardened Image.
 # Official DHI Python images are published separately at dhi.io and are not used here.
-FROM python:3.11-slim AS builder
+FROM python:3.15-slim AS builder
 
 WORKDIR /build
 
@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
-FROM python:3.11-slim
+FROM python:3.15-slim
 
 LABEL org.opencontainers.image.title="async-spider" \
       org.opencontainers.image.description="Single-process async crawler using python:3.11-slim"
